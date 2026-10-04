@@ -95,7 +95,9 @@
                     android:textColor="@color/text_secondary"
                     android:textSize="12sp" />
 
+                <!-- Live Single Meter (Active during Ping / Download / Upload / Idle) -->
                 <LinearLayout
+                    android:id="@+id/layoutLiveMeter"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginTop="4dp"
@@ -123,6 +125,100 @@
                         android:text="Mbps"
                         android:textColor="@color/text_secondary"
                         android:textSize="16sp" />
+                </LinearLayout>
+
+                <!-- Dual Symmetrical Hero Display (Active on COMPLETED) -->
+                <LinearLayout
+                    android:id="@+id/layoutCompletedHero"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:baselineAligned="false"
+                    android:orientation="horizontal"
+                    android:visibility="gone">
+
+                    <!-- Left: Download Result -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-bold"
+                            android:letterSpacing="0.08"
+                            android:text="@string/download_label"
+                            android:textColor="@color/accent_download"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/tvHeroDownloadVal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="sans-serif-black"
+                            android:includeFontPadding="false"
+                            android:text="0.00"
+                            android:textColor="@color/text_primary"
+                            android:textSize="36sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-medium"
+                            android:letterSpacing="0.05"
+                            android:text="Mbps"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <!-- Center Hairline Divider -->
+                    <View
+                        android:layout_width="1dp"
+                        android:layout_height="52dp"
+                        android:layout_gravity="center_vertical"
+                        android:background="@color/border_stroke" />
+
+                    <!-- Right: Upload Result -->
+                    <LinearLayout
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:gravity="center"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-bold"
+                            android:letterSpacing="0.08"
+                            android:text="@string/upload_label"
+                            android:textColor="@color/accent_upload"
+                            android:textSize="11sp" />
+
+                        <TextView
+                            android:id="@+id/tvHeroUploadVal"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:fontFamily="sans-serif-black"
+                            android:includeFontPadding="false"
+                            android:text="0.00"
+                            android:textColor="@color/text_primary"
+                            android:textSize="36sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:fontFamily="sans-serif-medium"
+                            android:letterSpacing="0.05"
+                            android:text="Mbps"
+                            android:textColor="@color/text_secondary"
+                            android:textSize="11sp" />
+                    </LinearLayout>
                 </LinearLayout>
 
                 <!-- Live Sparkline Graph -->
