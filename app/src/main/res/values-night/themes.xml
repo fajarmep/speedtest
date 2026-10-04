@@ -11,5 +11,8 @@
         <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.Flat</item>
         <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Flat</item>
         <item name="shapeAppearanceLargeComponent">@style/ShapeAppearance.Flat</item>
+
+        <!-- Flat Dialog -->
+        <item name="materialAlertDialogTheme">@style/ThemeOverlay.SpeedTest.Dialog</item>
     </style>
 </resources>

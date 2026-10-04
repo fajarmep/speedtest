@@ -1,10 +1,14 @@
 package com.fajar.speedtest
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.fajar.speedtest.databinding.ActivityMainBinding
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -16,12 +20,31 @@ class MainActivity : AppCompatActivity() {
     private var testJob: Job? = null
     private var isRunning = false
 
+    private var currentServer: SpeedServer = ServerCatalog.servers[0]
+    private var currentState: SpeedState = SpeedState()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        updateNetworkBadge()
         setupListeners()
+        loadInitialProviderInfo()
+    }
+
+    private fun updateNetworkBadge() {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        val network = cm?.activeNetwork
+        val caps = cm?.getNetworkCapabilities(network)
+
+        val badgeText = when {
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true -> "● WIFI"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true -> "● CELLULAR"
+            caps?.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) == true -> "● ETHERNET"
+            else -> "● ONLINE"
+        }
+        binding.tvNetworkBadge.text = badgeText
     }
 
     private fun setupListeners() {
@@ -32,15 +55,57 @@ class MainActivity : AppCompatActivity() {
                 startTest()
             }
         }
+
+        binding.btnChangeServer.setOnClickListener {
+            showServerSelectionDialog()
+        }
+
+        binding.cardServerInfo.setOnClickListener {
+            if (!isRunning) {
+                showServerSelectionDialog()
+            }
+        }
+    }
+
+    private fun loadInitialProviderInfo() {
+        lifecycleScope.launch {
+            val providerState = engine.fetchProviderInfo()
+            currentState = currentState.copy(
+                ip = providerState.ip,
+                isp = providerState.isp,
+                asn = providerState.asn,
+                location = providerState.location
+            )
+            runOnUiThread {
+                updateProviderUi(currentState)
+            }
+        }
+    }
+
+    private fun showServerSelectionDialog() {
+        val serverOptions = ServerCatalog.servers.map { "${it.name}\n${it.region}" }.toTypedArray()
+        val currentIndex = ServerCatalog.servers.indexOfFirst { it.id == currentServer.id }.coerceAtLeast(0)
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_select_server)
+            .setSingleChoiceItems(serverOptions, currentIndex) { dialog, which ->
+                currentServer = ServerCatalog.servers[which]
+                binding.tvServerVal.text = currentServer.name
+                binding.tvServerLocation.text = currentServer.region
+                dialog.dismiss()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 
     private fun startTest() {
         isRunning = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         binding.btnAction.text = getString(R.string.stop_test)
-        binding.btnAction.setBackgroundColor(getColor(R.color.border_stroke))
+        binding.btnChangeServer.isEnabled = false
+        binding.graphView.clear()
 
-        // Reset display
+        // Reset metrics
         binding.tvPingVal.text = "-- ms"
         binding.tvJitterVal.text = "-- ms"
         binding.tvDownloadVal.text = "-- Mbps"
@@ -49,7 +114,8 @@ class MainActivity : AppCompatActivity() {
         binding.progressBar.progress = 0
 
         testJob = lifecycleScope.launch {
-            engine.runSpeedTest { state ->
+            engine.runSpeedTest(currentServer, currentState) { state ->
+                currentState = state
                 runOnUiThread {
                     updateUi(state)
                 }
@@ -70,18 +136,31 @@ class MainActivity : AppCompatActivity() {
         isRunning = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         binding.btnAction.text = getString(R.string.start_test)
-        binding.btnAction.setBackgroundColor(getColor(R.color.primary))
+        binding.btnChangeServer.isEnabled = true
     }
 
-    private fun updateUi(state: SpeedState) {
-        binding.progressBar.progress = state.progress
-
+    private fun updateProviderUi(state: SpeedState) {
         if (state.ip.isNotBlank() && state.ip != "--") {
             binding.tvIpVal.text = state.ip
         }
-        if (state.colo.isNotBlank() && state.colo != "--") {
-            binding.tvServerVal.text = "Cloudflare (${state.colo})"
+        if (state.isp.isNotBlank() && state.isp != "--") {
+            binding.tvIspVal.text = state.isp
         }
+        val detail = buildString {
+            if (state.asn.isNotBlank() && state.asn != "--") append(state.asn)
+            if (state.location.isNotBlank() && state.location != "--") {
+                if (isNotEmpty()) append(" • ")
+                append(state.location)
+            }
+        }
+        if (detail.isNotBlank()) {
+            binding.tvIspDetail.text = detail
+        }
+    }
+
+    private fun updateUi(state: SpeedState) {
+        updateProviderUi(state)
+        binding.progressBar.progress = state.progress
 
         if (state.pingMs > 0) {
             binding.tvPingVal.text = String.format(Locale.US, "%d ms", state.pingMs)
@@ -115,11 +194,13 @@ class MainActivity : AppCompatActivity() {
                 binding.tvPhaseLabel.text = getString(R.string.status_testing_download)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.currentSpeedMbps)
                 binding.tvSpeedUnit.text = "Mbps"
+                binding.graphView.addPoint(state.currentSpeedMbps.toFloat())
             }
             TestStage.UPLOAD -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_testing_upload)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.currentSpeedMbps)
                 binding.tvSpeedUnit.text = "Mbps"
+                binding.graphView.addPoint(state.currentSpeedMbps.toFloat())
             }
             TestStage.COMPLETED -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_completed)

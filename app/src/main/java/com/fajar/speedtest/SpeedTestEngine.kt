@@ -8,6 +8,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okio.BufferedSink
+import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
@@ -31,7 +32,11 @@ data class SpeedState(
     val downloadMbps: Double = 0.0,
     val uploadMbps: Double = 0.0,
     val ip: String = "--",
-    val colo: String = "--",
+    val isp: String = "--",
+    val asn: String = "--",
+    val location: String = "--",
+    val serverName: String = "--",
+    val serverLocation: String = "--",
     val progress: Int = 0,
     val errorMessage: String? = null
 )
@@ -39,31 +44,117 @@ data class SpeedState(
 class SpeedTestEngine {
 
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(8, TimeUnit.SECONDS)
+        .readTimeout(12, TimeUnit.SECONDS)
+        .writeTimeout(12, TimeUnit.SECONDS)
         .retryOnConnectionFailure(true)
         .build()
 
-    suspend fun runSpeedTest(onProgress: (SpeedState) -> Unit) = withContext(Dispatchers.IO) {
-        var state = SpeedState(stage = TestStage.INITIALIZING)
+    suspend fun fetchProviderInfo(): SpeedState = withContext(Dispatchers.IO) {
+        var ip = "--"
+        var isp = "--"
+        var asn = "--"
+        var location = "--"
+        var colo = "CGK"
+
+        // 1. Try ipwho.is (fast HTTPS, zero key, full ISP name)
+        try {
+            val req = Request.Builder()
+                .url("https://ipwho.is/")
+                .build()
+            client.newCall(req).execute().use { res ->
+                if (res.isSuccessful) {
+                    val body = res.body?.string().orEmpty()
+                    val json = JSONObject(body)
+                    if (json.optBoolean("success", true)) {
+                        ip = json.optString("ip", ip)
+                        val city = json.optString("city", "")
+                        val country = json.optString("country", "")
+                        location = if (city.isNotBlank()) "$city, $country" else country
+
+                        val conn = json.optJSONObject("connection")
+                        if (conn != null) {
+                            isp = conn.optString("isp", conn.optString("org", isp))
+                            val asnNum = conn.optInt("asn", 0)
+                            if (asnNum > 0) asn = "AS$asnNum"
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        // 2. Cloudflare trace fallback
+        if (isp == "--" || ip == "--") {
+            try {
+                val cfReq = Request.Builder()
+                    .url("https://speed.cloudflare.com/__down?bytes=0")
+                    .build()
+                client.newCall(cfReq).execute().use { res ->
+                    val cfIp = res.header("cf-meta-ip")
+                    val cfAsn = res.header("cf-meta-asn")
+                    val cfCity = res.header("cf-meta-city")
+                    val cfCountry = res.header("cf-meta-country")
+                    val cfColo = res.header("cf-meta-colo")
+
+                    if (!cfIp.isNullOrBlank()) ip = cfIp
+                    if (!cfAsn.isNullOrBlank()) asn = "AS$cfAsn"
+                    if (!cfColo.isNullOrBlank()) colo = cfColo
+                    if (location == "--" && !cfCity.isNullOrBlank()) {
+                        location = "$cfCity, ${cfCountry ?: ""}"
+                    }
+                    if (isp == "--" && !cfAsn.isNullOrBlank()) {
+                        isp = "Network AS$cfAsn"
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        SpeedState(
+            ip = ip,
+            isp = isp,
+            asn = asn,
+            location = location,
+            serverName = "Cloudflare Edge ($colo)",
+            serverLocation = location
+        )
+    }
+
+    suspend fun runSpeedTest(
+        server: SpeedServer,
+        initialState: SpeedState,
+        onProgress: (SpeedState) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        var state = initialState.copy(
+            stage = TestStage.INITIALIZING,
+            serverName = server.name,
+            serverLocation = server.region,
+            progress = 0
+        )
         onProgress(state)
 
         try {
-            // 1. Fetch IP & Cloudflare edge metadata
-            state = fetchMetadata(state)
+            // Refresh provider info if empty
+            if (state.isp == "--" || state.ip == "--") {
+                val fetched = fetchProviderInfo()
+                state = state.copy(
+                    ip = fetched.ip,
+                    isp = fetched.isp,
+                    asn = fetched.asn,
+                    location = fetched.location
+                )
+                onProgress(state)
+            }
+
+            // 1. Ping & Jitter
+            state = measurePingAndJitter(server, state, onProgress)
             onProgress(state)
 
-            // 2. Measure Ping & Jitter
-            state = measurePingAndJitter(state, onProgress)
+            // 2. Download Speed Test
+            state = measureDownloadSpeed(server, state, onProgress)
             onProgress(state)
 
-            // 3. Download Speed Test
-            state = measureDownloadSpeed(state, onProgress)
-            onProgress(state)
-
-            // 4. Upload Speed Test
-            state = measureUploadSpeed(state, onProgress)
+            // 3. Upload Speed Test
+            state = measureUploadSpeed(server, state, onProgress)
             onProgress(state)
 
             state = state.copy(
@@ -78,36 +169,15 @@ class SpeedTestEngine {
                 state = state.copy(
                     stage = TestStage.ERROR,
                     currentSpeedMbps = 0.0,
-                    errorMessage = e.message ?: "Test interrupted or network failed"
+                    errorMessage = e.message ?: "Test interrupted"
                 )
                 onProgress(state)
             }
         }
     }
 
-    private fun fetchMetadata(currentState: SpeedState): SpeedState {
-        val request = Request.Builder()
-            .url("https://cloudflare.com/cdn-cgi/trace")
-            .build()
-
-        return try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return currentState
-                val body = response.body?.string().orEmpty()
-                var ip = currentState.ip
-                var colo = currentState.colo
-                for (line in body.lineSequence()) {
-                    if (line.startsWith("ip=")) ip = line.substringAfter("ip=").trim()
-                    if (line.startsWith("colo=")) colo = line.substringAfter("colo=").trim()
-                }
-                currentState.copy(ip = ip, colo = colo)
-            }
-        } catch (_: IOException) {
-            currentState
-        }
-    }
-
     private fun measurePingAndJitter(
+        server: SpeedServer,
         currentState: SpeedState,
         onProgress: (SpeedState) -> Unit
     ): SpeedState {
@@ -116,7 +186,7 @@ class SpeedTestEngine {
 
         val pingSamples = mutableListOf<Long>()
         val request = Request.Builder()
-            .url("https://cloudflare.com/cdn-cgi/trace")
+            .url(server.pingUrl)
             .build()
 
         val totalRounds = 6
@@ -127,12 +197,10 @@ class SpeedTestEngine {
                     response.body?.string()
                 }
                 val durationMs = (System.nanoTime() - start) / 1_000_000
-                if (i > 0) { // Discard warm-up round
+                if (i > 0) {
                     pingSamples.add(durationMs)
                 }
-            } catch (_: IOException) {
-                // Ignore single ping failure
-            }
+            } catch (_: IOException) {}
 
             val progress = ((i + 1) * 100) / totalRounds
             val minPing = if (pingSamples.isNotEmpty()) pingSamples.minOrNull() ?: 0L else 0L
@@ -148,6 +216,7 @@ class SpeedTestEngine {
     }
 
     private suspend fun measureDownloadSpeed(
+        server: SpeedServer,
         currentState: SpeedState,
         onProgress: (SpeedState) -> Unit
     ): SpeedState {
@@ -155,7 +224,7 @@ class SpeedTestEngine {
         onProgress(state)
 
         val request = Request.Builder()
-            .url("https://speed.cloudflare.com/__down?bytes=50000000") // 50MB payload
+            .url(server.downloadUrl)
             .build()
 
         val buffer = ByteArray(64 * 1024)
@@ -165,8 +234,8 @@ class SpeedTestEngine {
 
         try {
             client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Download test HTTP ${response.code}")
-                val inputStream = response.body?.byteStream() ?: throw IOException("Empty response body")
+                if (!response.isSuccessful) throw IOException("Download HTTP ${response.code}")
+                val inputStream = response.body?.byteStream() ?: throw IOException("Empty response")
 
                 val startTime = System.currentTimeMillis()
                 var lastSampleTime = startTime
@@ -179,7 +248,7 @@ class SpeedTestEngine {
 
                     val now = System.currentTimeMillis()
                     val interval = now - lastSampleTime
-                    if (interval >= 150) {
+                    if (interval >= 120) {
                         val bytesDiff = totalBytes - lastSampleBytes
                         val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
                         smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
@@ -193,9 +262,7 @@ class SpeedTestEngine {
                         lastSampleBytes = totalBytes
                     }
 
-                    if (now - startTime >= testDurationMs) {
-                        break
-                    }
+                    if (now - startTime >= testDurationMs) break
                 }
 
                 val totalElapsed = System.currentTimeMillis() - startTime
@@ -204,7 +271,6 @@ class SpeedTestEngine {
             }
         } catch (e: Exception) {
             if (!coroutineContext.isActive) throw e
-            // If download stream ended early, record what was achieved
             if (totalBytes > 0) {
                 state = state.copy(downloadMbps = smoothedSpeed)
             } else {
@@ -216,6 +282,7 @@ class SpeedTestEngine {
     }
 
     private suspend fun measureUploadSpeed(
+        server: SpeedServer,
         currentState: SpeedState,
         onProgress: (SpeedState) -> Unit
     ): SpeedState {
@@ -223,7 +290,7 @@ class SpeedTestEngine {
         onProgress(state)
 
         val uploadDurationMs = 7000L
-        val dummyPayload = ByteArray(64 * 1024) { 0x55.toByte() }
+        val dummyPayload = ByteArray(64 * 1024) { 0x5A.toByte() }
         var totalBytesUploaded = 0L
         var smoothedSpeed = 0.0
 
@@ -244,7 +311,7 @@ class SpeedTestEngine {
                     totalBytesUploaded += dummyPayload.size
 
                     val interval = now - lastSampleTime
-                    if (interval >= 150) {
+                    if (interval >= 120) {
                         val bytesDiff = totalBytesUploaded - lastSampleBytes
                         val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
                         smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
@@ -262,7 +329,7 @@ class SpeedTestEngine {
         }
 
         val request = Request.Builder()
-            .url("https://speed.cloudflare.com/__up")
+            .url(server.uploadUrl)
             .post(requestBody)
             .build()
 
