@@ -1,11 +1,19 @@
 package com.fajar.speedtest
 
+import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationListener
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.view.WindowManager
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.fajar.speedtest.databinding.ActivityMainBinding
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -20,8 +28,19 @@ class MainActivity : AppCompatActivity() {
     private var testJob: Job? = null
     private var isRunning = false
 
-    private var currentServer: SpeedServer = ServerCatalog.servers[0]
+    private var serverList: List<SpeedServer> = ServerCatalog.getServersWithDistance(null, null)
+    private var currentServer: SpeedServer = serverList[0]
     private var currentState: SpeedState = SpeedState()
+
+    private val locationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+                      permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        if (granted) {
+            fetchGpsLocation()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -30,6 +49,7 @@ class MainActivity : AppCompatActivity() {
 
         updateNetworkBadge()
         setupListeners()
+        requestLocationPermission()
         loadInitialProviderInfo()
     }
 
@@ -67,6 +87,107 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestLocationPermission() {
+        val fineGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val coarseGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        if (fineGranted || coarseGranted) {
+            fetchGpsLocation()
+        } else {
+            locationPermissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                )
+            )
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun fetchGpsLocation() {
+        val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+
+        var bestLocation: Location? = null
+        if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+            bestLocation = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+        }
+        if (bestLocation == null && lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+            bestLocation = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+        }
+
+        if (bestLocation != null) {
+            applyLocationCoordinates(bestLocation.latitude, bestLocation.longitude, isGps = true)
+        } else {
+            // One-shot location update request
+            val provider = when {
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
+                lm.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
+                else -> null
+            }
+            if (provider != null) {
+                val listener = object : LocationListener {
+                    override fun onLocationChanged(loc: Location) {
+                        lm.removeUpdates(this)
+                        applyLocationCoordinates(loc.latitude, loc.longitude, isGps = true)
+                    }
+                    @Deprecated("Deprecated in Java")
+                    override fun onStatusChanged(p: String?, s: Int, e: Bundle?) {}
+                    override fun onProviderEnabled(p: String) {}
+                    override fun onProviderDisabled(p: String) {}
+                }
+                try {
+                    lm.requestLocationUpdates(provider, 1000L, 10f, listener, mainLooper)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private fun applyLocationCoordinates(lat: Double, lon: Double, isGps: Boolean) {
+        currentState = currentState.copy(
+            latitude = lat,
+            longitude = lon,
+            isGpsLocation = isGps
+        )
+        serverList = ServerCatalog.getServersWithDistance(lat, lon)
+
+        // Find nearest concrete server
+        val nearestConcrete = serverList.filter { it.id != "auto" }.minByOrNull { it.distanceKm ?: Double.MAX_VALUE }
+        if (currentServer.id == "auto" && nearestConcrete != null) {
+            val dist = nearestConcrete.distanceKm?.let {
+                if (it < 10) String.format(Locale.US, "%.1f km", it) else String.format(Locale.US, "%.0f km", it)
+            } ?: ""
+            currentServer = currentServer.copy(
+                distanceKm = nearestConcrete.distanceKm,
+                name = "Auto (${nearestConcrete.name})",
+                region = "Jarak Terdekat: $dist"
+            )
+        } else {
+            serverList.find { it.id == currentServer.id }?.let {
+                currentServer = it
+            }
+        }
+
+        runOnUiThread {
+            binding.tvServerVal.text = currentServer.getDisplayNameWithDistance()
+            binding.tvServerLocation.text = currentServer.region
+            val locTag = if (isGps) "GPS Akurat" else "IP Geo"
+            val detail = buildString {
+                if (currentState.asn.isNotBlank() && currentState.asn != "--") append(currentState.asn)
+                if (currentState.location.isNotBlank() && currentState.location != "--") {
+                    if (isNotEmpty()) append(" • ")
+                    append("${currentState.location} [$locTag]")
+                }
+            }
+            if (detail.isNotBlank()) {
+                binding.tvIspDetail.text = detail
+            }
+        }
+    }
+
     private fun loadInitialProviderInfo() {
         lifecycleScope.launch {
             val providerState = engine.fetchProviderInfo()
@@ -74,8 +195,16 @@ class MainActivity : AppCompatActivity() {
                 ip = providerState.ip,
                 isp = providerState.isp,
                 asn = providerState.asn,
-                location = providerState.location
+                location = providerState.location,
+                latitude = currentState.latitude ?: providerState.latitude,
+                longitude = currentState.longitude ?: providerState.longitude
             )
+
+            // If GPS didn't already supply coordinates, use IP geolocation coordinates
+            if (!currentState.isGpsLocation && currentState.latitude != null && currentState.longitude != null) {
+                applyLocationCoordinates(currentState.latitude!!, currentState.longitude!!, isGps = false)
+            }
+
             runOnUiThread {
                 updateProviderUi(currentState)
             }
@@ -83,14 +212,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showServerSelectionDialog() {
-        val serverOptions = ServerCatalog.servers.map { "${it.name}\n${it.region}" }.toTypedArray()
-        val currentIndex = ServerCatalog.servers.indexOfFirst { it.id == currentServer.id }.coerceAtLeast(0)
+        val serverOptions = serverList.map {
+            "${it.getDisplayNameWithDistance()}\n${it.region}"
+        }.toTypedArray()
+
+        val currentIndex = serverList.indexOfFirst { it.id == currentServer.id }.coerceAtLeast(0)
 
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.dialog_select_server)
             .setSingleChoiceItems(serverOptions, currentIndex) { dialog, which ->
-                currentServer = ServerCatalog.servers[which]
-                binding.tvServerVal.text = currentServer.name
+                currentServer = serverList[which]
+                binding.tvServerVal.text = currentServer.getDisplayNameWithDistance()
                 binding.tvServerLocation.text = currentServer.region
                 dialog.dismiss()
             }
@@ -146,11 +278,12 @@ class MainActivity : AppCompatActivity() {
         if (state.isp.isNotBlank() && state.isp != "--") {
             binding.tvIspVal.text = state.isp
         }
+        val locTag = if (state.isGpsLocation) "GPS Akurat" else "IP Geo"
         val detail = buildString {
             if (state.asn.isNotBlank() && state.asn != "--") append(state.asn)
             if (state.location.isNotBlank() && state.location != "--") {
                 if (isNotEmpty()) append(" • ")
-                append(state.location)
+                append("${state.location} [$locTag]")
             }
         }
         if (detail.isNotBlank()) {
@@ -180,10 +313,12 @@ class MainActivity : AppCompatActivity() {
             TestStage.IDLE -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_ready)
                 binding.tvLiveSpeed.text = "0.00"
+                binding.tvSpeedUnit.text = "Mbps"
             }
             TestStage.INITIALIZING -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_connecting)
                 binding.tvLiveSpeed.text = "0.00"
+                binding.tvSpeedUnit.text = "Mbps"
             }
             TestStage.PING -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_testing_ping)
@@ -205,7 +340,7 @@ class MainActivity : AppCompatActivity() {
             TestStage.COMPLETED -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_completed)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.downloadMbps)
-                binding.tvSpeedUnit.text = "Mbps"
+                binding.tvSpeedUnit.text = "Mbps (DL)"
             }
             TestStage.ERROR -> {
                 binding.tvPhaseLabel.text = state.errorMessage ?: "ERROR"

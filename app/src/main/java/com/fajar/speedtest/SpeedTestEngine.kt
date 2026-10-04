@@ -35,6 +35,9 @@ data class SpeedState(
     val isp: String = "--",
     val asn: String = "--",
     val location: String = "--",
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    val isGpsLocation: Boolean = false,
     val serverName: String = "--",
     val serverLocation: String = "--",
     val progress: Int = 0,
@@ -55,9 +58,11 @@ class SpeedTestEngine {
         var isp = "--"
         var asn = "--"
         var location = "--"
+        var lat: Double? = null
+        var lon: Double? = null
         var colo = "CGK"
 
-        // 1. Try ipwho.is (fast HTTPS, zero key, full ISP name)
+        // 1. Try ipwho.is (fast HTTPS, rich metadata)
         try {
             val req = Request.Builder()
                 .url("https://ipwho.is/")
@@ -72,6 +77,9 @@ class SpeedTestEngine {
                         val country = json.optString("country", "")
                         location = if (city.isNotBlank()) "$city, $country" else country
 
+                        lat = json.optDouble("latitude")
+                        lon = json.optDouble("longitude")
+
                         val conn = json.optJSONObject("connection")
                         if (conn != null) {
                             isp = conn.optString("isp", conn.optString("org", isp))
@@ -84,7 +92,7 @@ class SpeedTestEngine {
         } catch (_: Exception) {}
 
         // 2. Cloudflare trace fallback
-        if (isp == "--" || ip == "--") {
+        if (isp == "--" || ip == "--" || lat == null) {
             try {
                 val cfReq = Request.Builder()
                     .url("https://speed.cloudflare.com/__down?bytes=0")
@@ -95,10 +103,15 @@ class SpeedTestEngine {
                     val cfCity = res.header("cf-meta-city")
                     val cfCountry = res.header("cf-meta-country")
                     val cfColo = res.header("cf-meta-colo")
+                    val cfLat = res.header("cf-meta-latitude")?.toDoubleOrNull()
+                    val cfLon = res.header("cf-meta-longitude")?.toDoubleOrNull()
 
                     if (!cfIp.isNullOrBlank()) ip = cfIp
                     if (!cfAsn.isNullOrBlank()) asn = "AS$cfAsn"
                     if (!cfColo.isNullOrBlank()) colo = cfColo
+                    if (lat == null && cfLat != null) lat = cfLat
+                    if (lon == null && cfLon != null) lon = cfLon
+
                     if (location == "--" && !cfCity.isNullOrBlank()) {
                         location = "$cfCity, ${cfCountry ?: ""}"
                     }
@@ -114,6 +127,9 @@ class SpeedTestEngine {
             isp = isp,
             asn = asn,
             location = location,
+            latitude = lat,
+            longitude = lon,
+            isGpsLocation = false,
             serverName = "Cloudflare Edge ($colo)",
             serverLocation = location
         )
@@ -126,7 +142,7 @@ class SpeedTestEngine {
     ) = withContext(Dispatchers.IO) {
         var state = initialState.copy(
             stage = TestStage.INITIALIZING,
-            serverName = server.name,
+            serverName = server.getDisplayNameWithDistance(),
             serverLocation = server.region,
             progress = 0
         )
@@ -140,7 +156,9 @@ class SpeedTestEngine {
                     ip = fetched.ip,
                     isp = fetched.isp,
                     asn = fetched.asn,
-                    location = fetched.location
+                    location = if (state.location == "--") fetched.location else state.location,
+                    latitude = state.latitude ?: fetched.latitude,
+                    longitude = state.longitude ?: fetched.longitude
                 )
                 onProgress(state)
             }
@@ -159,7 +177,7 @@ class SpeedTestEngine {
 
             state = state.copy(
                 stage = TestStage.COMPLETED,
-                currentSpeedMbps = 0.0,
+                currentSpeedMbps = state.downloadMbps,
                 progress = 100
             )
             onProgress(state)
@@ -231,6 +249,7 @@ class SpeedTestEngine {
         val testDurationMs = 8000L
         var totalBytes = 0L
         var smoothedSpeed = 0.0
+        val recordedSamples = mutableListOf<Double>()
 
         try {
             client.newCall(request).execute().use { response ->
@@ -253,9 +272,17 @@ class SpeedTestEngine {
                         val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
                         smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
 
+                        if (now - startTime > 800) {
+                            recordedSamples.add(smoothedSpeed)
+                        }
+
                         val elapsed = now - startTime
                         val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
-                        state = state.copy(currentSpeedMbps = smoothedSpeed, progress = progress)
+                        state = state.copy(
+                            currentSpeedMbps = smoothedSpeed,
+                            downloadMbps = smoothedSpeed, // Live update to download box!
+                            progress = progress
+                        )
                         onProgress(state)
 
                         lastSampleTime = now
@@ -266,16 +293,21 @@ class SpeedTestEngine {
                 }
 
                 val totalElapsed = System.currentTimeMillis() - startTime
-                val avgSpeed = if (totalElapsed > 0) (totalBytes * 8.0) / (totalElapsed * 1000.0) else smoothedSpeed
-                state = state.copy(downloadMbps = avgSpeed, currentSpeedMbps = avgSpeed, progress = 100)
+                val finalSpeed = when {
+                    recordedSamples.isNotEmpty() -> {
+                        val sorted = recordedSamples.sorted()
+                        val cutIndex = (sorted.size * 0.15).toInt()
+                        sorted.subList(cutIndex, sorted.size).average()
+                    }
+                    totalElapsed > 0 -> (totalBytes * 8.0) / (totalElapsed * 1000.0)
+                    else -> smoothedSpeed
+                }
+                state = state.copy(downloadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
             }
         } catch (e: Exception) {
             if (!coroutineContext.isActive) throw e
-            if (totalBytes > 0) {
-                state = state.copy(downloadMbps = smoothedSpeed)
-            } else {
-                throw e
-            }
+            val finalSpeed = if (recordedSamples.isNotEmpty()) recordedSamples.average() else smoothedSpeed
+            state = state.copy(downloadMbps = finalSpeed, currentSpeedMbps = finalSpeed)
         }
 
         return state
@@ -293,6 +325,7 @@ class SpeedTestEngine {
         val dummyPayload = ByteArray(64 * 1024) { 0x5A.toByte() }
         var totalBytesUploaded = 0L
         var smoothedSpeed = 0.0
+        val recordedSamples = mutableListOf<Double>()
 
         val requestBody = object : RequestBody() {
             override fun contentType() = "application/octet-stream".toMediaTypeOrNull()
@@ -316,9 +349,17 @@ class SpeedTestEngine {
                         val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
                         smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
 
+                        if (now - startTime > 800) {
+                            recordedSamples.add(smoothedSpeed)
+                        }
+
                         val elapsed = now - startTime
                         val progress = ((elapsed.toFloat() / uploadDurationMs) * 100).toInt().coerceIn(0, 100)
-                        state = state.copy(currentSpeedMbps = smoothedSpeed, progress = progress)
+                        state = state.copy(
+                            currentSpeedMbps = smoothedSpeed,
+                            uploadMbps = smoothedSpeed, // Live update to upload box!
+                            progress = progress
+                        )
                         onProgress(state)
 
                         lastSampleTime = now
@@ -335,16 +376,24 @@ class SpeedTestEngine {
 
         try {
             client.newCall(request).execute().use { response ->
-                val finalSpeed = if (smoothedSpeed > 0) smoothedSpeed else 0.0
+                val finalSpeed = when {
+                    recordedSamples.isNotEmpty() -> {
+                        // Drop lowest 15% ramp-up outliers, average steady sustained rate
+                        val sorted = recordedSamples.sorted()
+                        val cutIndex = (sorted.size * 0.15).toInt()
+                        sorted.subList(cutIndex, sorted.size).average()
+                    }
+                    smoothedSpeed > 0 -> smoothedSpeed
+                    else -> 0.0
+                }
                 state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
             }
         } catch (e: Exception) {
             if (!coroutineContext.isActive) throw e
-            if (totalBytesUploaded > 0) {
-                state = state.copy(uploadMbps = smoothedSpeed)
-            } else {
-                throw e
-            }
+            val finalSpeed = if (recordedSamples.isNotEmpty()) {
+                recordedSamples.average()
+            } else if (smoothedSpeed > 0) smoothedSpeed else 0.0
+            state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed)
         }
 
         return state
