@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#ED3969</color>
+    <color name="primary_variant">#D81B60</color>
+    <color name="on_primary">#FFFFFF</color>
+    
+    <color name="bg_screen">#F8F9FA</color>
+    <color name="bg_surface">#FFFFFF</color>
+    <color name="border_stroke">#CCCCCC</color>
+    
+    <color name="text_primary">#1A1A1A</color>
+    <color name="text_secondary">#666666</color>
+    <color name="text_hint">#999999</color>
+    
+    <color name="accent_ping">#00897B</color>
+    <color name="accent_download">#1E88E5</color>
+    <color name="accent_upload">#8E24AA</color>
+</resources>

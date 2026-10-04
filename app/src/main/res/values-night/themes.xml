@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SpeedTest" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/primary</item>
+        <item name="colorOnPrimary">@color/on_primary</item>
+        <item name="android:windowBackground">@color/bg_screen</item>
+        <item name="android:statusBarColor">@color/bg_screen</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- Flat UI: Enforce 0dp corner radius globally -->
+        <item name="shapeAppearanceSmallComponent">@style/ShapeAppearance.Flat</item>
+        <item name="shapeAppearanceMediumComponent">@style/ShapeAppearance.Flat</item>
+        <item name="shapeAppearanceLargeComponent">@style/ShapeAppearance.Flat</item>
+    </style>
+</resources>

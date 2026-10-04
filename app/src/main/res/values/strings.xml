@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">SpeedTest</string>
+    <string name="ping_label">PING</string>
+    <string name="jitter_label">JITTER</string>
+    <string name="download_label">DOWNLOAD</string>
+    <string name="upload_label">UPLOAD</string>
+    <string name="ip_label">IP ADDRESS</string>
+    <string name="server_label">SERVER EDGE</string>
+    <string name="network_label">NETWORK</string>
+    <string name="start_test">START SPEED TEST</string>
+    <string name="stop_test">STOP TEST</string>
+    <string name="status_ready">READY</string>
+    <string name="status_connecting">CONNECTING…</string>
+    <string name="status_testing_ping">TESTING PING…</string>
+    <string name="status_testing_download">TESTING DOWNLOAD…</string>
+    <string name="status_testing_upload">TESTING UPLOAD…</string>
+    <string name="status_completed">COMPLETED</string>
+</resources>
