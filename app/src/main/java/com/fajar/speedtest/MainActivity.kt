@@ -122,7 +122,6 @@ class MainActivity : AppCompatActivity() {
         if (bestLocation != null) {
             applyLocationCoordinates(bestLocation.latitude, bestLocation.longitude, isGps = true)
         } else {
-            // One-shot location update request
             val provider = when {
                 lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER) -> LocationManager.NETWORK_PROVIDER
                 lm.isProviderEnabled(LocationManager.GPS_PROVIDER) -> LocationManager.GPS_PROVIDER
@@ -154,7 +153,6 @@ class MainActivity : AppCompatActivity() {
         )
         serverList = ServerCatalog.getServersWithDistance(lat, lon)
 
-        // Find nearest concrete server
         val nearestConcrete = serverList.filter { it.id != "auto" }.minByOrNull { it.distanceKm ?: Double.MAX_VALUE }
         if (currentServer.id == "auto" && nearestConcrete != null) {
             val dist = nearestConcrete.distanceKm?.let {
@@ -200,7 +198,6 @@ class MainActivity : AppCompatActivity() {
                 longitude = currentState.longitude ?: providerState.longitude
             )
 
-            // If GPS didn't already supply coordinates, use IP geolocation coordinates
             if (!currentState.isGpsLocation && currentState.latitude != null && currentState.longitude != null) {
                 applyLocationCoordinates(currentState.latitude!!, currentState.longitude!!, isGps = false)
             }
@@ -328,19 +325,19 @@ class MainActivity : AppCompatActivity() {
             TestStage.DOWNLOAD -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_testing_download)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.currentSpeedMbps)
-                binding.tvSpeedUnit.text = "Mbps"
+                binding.tvSpeedUnit.text = "Mbps (DL)"
                 binding.graphView.addPoint(state.currentSpeedMbps.toFloat())
             }
             TestStage.UPLOAD -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_testing_upload)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.currentSpeedMbps)
-                binding.tvSpeedUnit.text = "Mbps"
+                binding.tvSpeedUnit.text = "Mbps (UL)"
                 binding.graphView.addPoint(state.currentSpeedMbps.toFloat())
             }
             TestStage.COMPLETED -> {
                 binding.tvPhaseLabel.text = getString(R.string.status_completed)
                 binding.tvLiveSpeed.text = String.format(Locale.US, "%.2f", state.downloadMbps)
-                binding.tvSpeedUnit.text = "Mbps (DL)"
+                binding.tvSpeedUnit.text = String.format(Locale.US, "Mbps DL • UL: %.2f Mbps", state.uploadMbps)
             }
             TestStage.ERROR -> {
                 binding.tvPhaseLabel.text = state.errorMessage ?: "ERROR"

@@ -6,8 +6,7 @@ import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody
-import okio.BufferedSink
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -177,7 +176,6 @@ class SpeedTestEngine {
 
             state = state.copy(
                 stage = TestStage.COMPLETED,
-                currentSpeedMbps = state.downloadMbps,
                 progress = 100
             )
             onProgress(state)
@@ -280,7 +278,7 @@ class SpeedTestEngine {
                         val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
                         state = state.copy(
                             currentSpeedMbps = smoothedSpeed,
-                            downloadMbps = smoothedSpeed, // Live update to download box!
+                            downloadMbps = smoothedSpeed,
                             progress = progress
                         )
                         onProgress(state)
@@ -321,81 +319,80 @@ class SpeedTestEngine {
         var state = currentState.copy(stage = TestStage.UPLOAD, progress = 0)
         onProgress(state)
 
-        val uploadDurationMs = 7000L
-        val dummyPayload = ByteArray(64 * 1024) { 0x5A.toByte() }
-        var totalBytesUploaded = 0L
-        var smoothedSpeed = 0.0
+        val totalTestTimeMs = 7000L
+        val startTime = System.currentTimeMillis()
         val recordedSamples = mutableListOf<Double>()
+        var smoothedSpeed = 0.0
 
-        val requestBody = object : RequestBody() {
-            override fun contentType() = "application/octet-stream".toMediaTypeOrNull()
+        // Multi-chunk sequential upload: measures TRUE end-to-end round trip wire delivery.
+        // Prevents TCP socket buffer dumps from giving fake 100+ Mbps numbers.
+        val dummySmall = ByteArray(512 * 1024) { 0x5A.toByte() }  // 512KB warmup chunk
+        val dummyMedium = ByteArray(1024 * 1024) { 0x5A.toByte() } // 1MB standard chunk
+        val dummyLarge = ByteArray(2 * 1024 * 1024) { 0x5A.toByte() } // 2MB fast chunk
 
-            override fun writeTo(sink: BufferedSink) {
-                val startTime = System.currentTimeMillis()
-                var lastSampleTime = startTime
-                var lastSampleBytes = 0L
+        val mediaType = "application/octet-stream".toMediaTypeOrNull()
+        var round = 0
 
-                while (true) {
-                    val now = System.currentTimeMillis()
-                    if (now - startTime >= uploadDurationMs) break
+        while (coroutineContext.isActive) {
+            val now = System.currentTimeMillis()
+            val elapsed = now - startTime
+            if (elapsed >= totalTestTimeMs) break
 
-                    sink.write(dummyPayload)
-                    sink.flush()
-                    totalBytesUploaded += dummyPayload.size
-
-                    val interval = now - lastSampleTime
-                    if (interval >= 120) {
-                        val bytesDiff = totalBytesUploaded - lastSampleBytes
-                        val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
-                        smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
-
-                        if (now - startTime > 800) {
-                            recordedSamples.add(smoothedSpeed)
-                        }
-
-                        val elapsed = now - startTime
-                        val progress = ((elapsed.toFloat() / uploadDurationMs) * 100).toInt().coerceIn(0, 100)
-                        state = state.copy(
-                            currentSpeedMbps = smoothedSpeed,
-                            uploadMbps = smoothedSpeed, // Live update to upload box!
-                            progress = progress
-                        )
-                        onProgress(state)
-
-                        lastSampleTime = now
-                        lastSampleBytes = totalBytesUploaded
-                    }
-                }
+            val payload = when {
+                round == 0 -> dummySmall
+                smoothedSpeed > 25.0 -> dummyLarge
+                else -> dummyMedium
             }
+
+            val reqBody = payload.toRequestBody(mediaType)
+            val request = Request.Builder()
+                .url(server.uploadUrl)
+                .header("Origin", "https://speed.cloudflare.com")
+                .header("Referer", "https://speed.cloudflare.com/")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                .post(reqBody)
+                .build()
+
+            val chunkStart = System.nanoTime()
+            try {
+                client.newCall(request).execute().use { response ->
+                    response.body?.string()
+                }
+                val chunkDurationSec = (System.nanoTime() - chunkStart) / 1_000_000_000.0
+                if (chunkDurationSec > 0.02) {
+                    val chunkMbps = (payload.size * 8.0) / (chunkDurationSec * 1_000_000.0)
+                    smoothedSpeed = if (smoothedSpeed == 0.0) chunkMbps else (smoothedSpeed * 0.4 + chunkMbps * 0.6)
+
+                    if (round > 0) { // Ignore first round (warmup TCP handshake)
+                        recordedSamples.add(chunkMbps)
+                    }
+
+                    val currentElapsed = System.currentTimeMillis() - startTime
+                    val progress = ((currentElapsed.toFloat() / totalTestTimeMs) * 100).toInt().coerceIn(0, 100)
+                    state = state.copy(
+                        currentSpeedMbps = smoothedSpeed,
+                        uploadMbps = smoothedSpeed,
+                        progress = progress
+                    )
+                    onProgress(state)
+                }
+            } catch (e: Exception) {
+                if (!coroutineContext.isActive) throw e
+            }
+            round++
         }
 
-        val request = Request.Builder()
-            .url(server.uploadUrl)
-            .post(requestBody)
-            .build()
-
-        try {
-            client.newCall(request).execute().use { response ->
-                val finalSpeed = when {
-                    recordedSamples.isNotEmpty() -> {
-                        // Drop lowest 15% ramp-up outliers, average steady sustained rate
-                        val sorted = recordedSamples.sorted()
-                        val cutIndex = (sorted.size * 0.15).toInt()
-                        sorted.subList(cutIndex, sorted.size).average()
-                    }
-                    smoothedSpeed > 0 -> smoothedSpeed
-                    else -> 0.0
-                }
-                state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
+        val finalSpeed = when {
+            recordedSamples.isNotEmpty() -> {
+                val sorted = recordedSamples.sorted()
+                val cutIndex = (sorted.size * 0.15).toInt()
+                sorted.subList(cutIndex, sorted.size).average()
             }
-        } catch (e: Exception) {
-            if (!coroutineContext.isActive) throw e
-            val finalSpeed = if (recordedSamples.isNotEmpty()) {
-                recordedSamples.average()
-            } else if (smoothedSpeed > 0) smoothedSpeed else 0.0
-            state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed)
+            smoothedSpeed > 0 -> smoothedSpeed
+            else -> 0.0
         }
 
+        state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
         return state
     }
 }
