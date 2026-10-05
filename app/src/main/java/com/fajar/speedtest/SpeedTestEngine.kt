@@ -60,6 +60,13 @@ class SpeedTestEngine {
         .retryOnConnectionFailure(true)
         .build()
 
+    fun cancel() {
+        try {
+            client.dispatcher.cancelAll()
+            client.connectionPool.evictAll()
+        } catch (_: Exception) {}
+    }
+
     suspend fun fetchProviderInfo(): SpeedState = withContext(Dispatchers.IO) {
         var ip = "--"
         var isp = "--"
@@ -284,7 +291,7 @@ class SpeedTestEngine {
             val start = System.nanoTime()
             try {
                 client.newCall(request).execute().use { response ->
-                    response.body?.string()
+                    response.body?.source()?.skip(Long.MAX_VALUE)
                 }
                 val durationMs = (System.nanoTime() - start) / 1_000_000
                 if (i > 0) {
@@ -431,7 +438,7 @@ class SpeedTestEngine {
             val chunkStart = System.nanoTime()
             try {
                 client.newCall(request).execute().use { response ->
-                    response.body?.string()
+                    response.body?.source()?.skip(Long.MAX_VALUE)
                 }
                 val chunkDurationSec = (System.nanoTime() - chunkStart) / 1_000_000_000.0
                 if (chunkDurationSec > 0.02) {

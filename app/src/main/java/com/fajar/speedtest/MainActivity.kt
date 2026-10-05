@@ -8,6 +8,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.Bundle
 import android.view.View
@@ -28,6 +29,8 @@ class MainActivity : AppCompatActivity() {
     private val engine = SpeedTestEngine()
     private var testJob: Job? = null
     private var providerJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var locationListener: LocationListener? = null
     private var isRunning = false
 
     private var serverList: List<SpeedServer> = ServerCatalog.getServersWithDistance(null, null)
@@ -50,9 +53,39 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         updateNetworkBadge()
+        registerNetworkCallback()
         setupListeners()
         requestLocationPermission()
         loadInitialProviderInfo()
+    }
+
+    private fun registerNetworkCallback() {
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    runOnUiThread { updateNetworkBadge() }
+                }
+                override fun onLost(network: Network) {
+                    runOnUiThread { updateNetworkBadge() }
+                }
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    runOnUiThread { updateNetworkBadge() }
+                }
+            }
+            networkCallback = callback
+            cm.registerDefaultNetworkCallback(callback)
+        } catch (_: Exception) {}
+    }
+
+    private fun unregisterNetworkCallback() {
+        try {
+            networkCallback?.let {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                cm?.unregisterNetworkCallback(it)
+                networkCallback = null
+            }
+        } catch (_: Exception) {}
     }
 
     private fun updateNetworkBadge() {
@@ -138,9 +171,10 @@ class MainActivity : AppCompatActivity() {
                 else -> null
             }
             if (provider != null) {
+                removeLocationUpdates()
                 val listener = object : LocationListener {
                     override fun onLocationChanged(loc: Location) {
-                        lm.removeUpdates(this)
+                        removeLocationUpdates()
                         applyLocationCoordinates(loc.latitude, loc.longitude, isGps = true)
                     }
                     @Deprecated("Deprecated in Java")
@@ -148,11 +182,22 @@ class MainActivity : AppCompatActivity() {
                     override fun onProviderEnabled(p: String) {}
                     override fun onProviderDisabled(p: String) {}
                 }
+                locationListener = listener
                 try {
                     lm.requestLocationUpdates(provider, 1000L, 10f, listener, mainLooper)
                 } catch (_: Exception) {}
             }
         }
+    }
+
+    private fun removeLocationUpdates() {
+        try {
+            locationListener?.let {
+                val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                lm?.removeUpdates(it)
+                locationListener = null
+            }
+        } catch (_: Exception) {}
     }
 
     private fun applyLocationCoordinates(lat: Double, lon: Double, isGps: Boolean) {
@@ -292,6 +337,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopTest() {
+        engine.cancel()
         testJob?.cancel()
         testJob = null
         onTestFinished()
@@ -322,6 +368,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun resetAllMetrics() {
+        engine.cancel()
         testJob?.cancel()
         testJob = null
         isRunning = false
@@ -473,6 +520,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        engine.cancel()
         testJob?.cancel()
+        providerJob?.cancel()
+        unregisterNetworkCallback()
+        removeLocationUpdates()
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 }
