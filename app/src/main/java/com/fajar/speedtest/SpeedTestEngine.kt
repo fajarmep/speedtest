@@ -58,6 +58,13 @@ class SpeedTestEngine {
             maxRequestsPerHost = 16
         })
         .retryOnConnectionFailure(true)
+        .addInterceptor { chain ->
+            val reqBuilder = chain.request().newBuilder()
+            reqBuilder.header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile; rv:125.0) Gecko/125.0 Firefox/125.0")
+            reqBuilder.header("Origin", "https://speed.cloudflare.com")
+            reqBuilder.header("Referer", "https://speed.cloudflare.com/")
+            chain.proceed(reqBuilder.build())
+        }
         .build()
 
     fun cancel() {
@@ -291,7 +298,7 @@ class SpeedTestEngine {
             val start = System.nanoTime()
             try {
                 client.newCall(request).execute().use { response ->
-                    response.body?.source()?.skip(Long.MAX_VALUE)
+                    response.body?.bytes()
                 }
                 val durationMs = (System.nanoTime() - start) / 1_000_000
                 if (i > 0) {
@@ -336,6 +343,7 @@ class SpeedTestEngine {
                         .build()
                     try {
                         client.newCall(request).execute().use { response ->
+                            if (!response.isSuccessful) return@use
                             val stream = response.body?.byteStream() ?: return@use
                             while (isRunning.get() && isActive) {
                                 val read = stream.read(buffer)
@@ -438,7 +446,7 @@ class SpeedTestEngine {
             val chunkStart = System.nanoTime()
             try {
                 client.newCall(request).execute().use { response ->
-                    response.body?.source()?.skip(Long.MAX_VALUE)
+                    response.body?.bytes()
                 }
                 val chunkDurationSec = (System.nanoTime() - chunkStart) / 1_000_000_000.0
                 if (chunkDurationSec > 0.02) {

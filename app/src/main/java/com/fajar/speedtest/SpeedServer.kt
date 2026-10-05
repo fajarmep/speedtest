@@ -60,7 +60,7 @@ object ServerCatalog {
             latitude = 0.0,
             longitude = 0.0,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -71,7 +71,7 @@ object ServerCatalog {
             latitude = -6.1256,
             longitude = 106.6558,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -82,7 +82,7 @@ object ServerCatalog {
             latitude = -7.3798,
             longitude = 112.7874,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -93,7 +93,7 @@ object ServerCatalog {
             latitude = 1.3644,
             longitude = 103.9915,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -104,7 +104,7 @@ object ServerCatalog {
             latitude = 35.7720,
             longitude = 140.3929,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -115,7 +115,7 @@ object ServerCatalog {
             latitude = -33.9399,
             longitude = 151.1753,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -126,7 +126,7 @@ object ServerCatalog {
             latitude = 50.0379,
             longitude = 8.5622,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         ),
         SpeedServer(
@@ -137,7 +137,7 @@ object ServerCatalog {
             latitude = 37.3639,
             longitude = -121.9289,
             pingUrl = "https://speed.cloudflare.com/__down?bytes=0",
-            downloadUrl = "https://speed.cloudflare.com/__down?bytes=50000000",
+            downloadUrl = "https://speed.cloudflare.com/__down?bytes=25000000",
             uploadUrl = "https://speed.cloudflare.com/__up"
         )
     )
