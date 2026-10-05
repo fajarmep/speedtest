@@ -77,6 +77,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        binding.btnReset.setOnClickListener {
+            resetAllMetrics()
+        }
+
+        binding.btnTestAgain.setOnClickListener {
+            startTest()
+        }
+
         binding.btnChangeServer.setOnClickListener {
             showServerSelectionDialog()
         }
@@ -231,12 +239,17 @@ class MainActivity : AppCompatActivity() {
     private fun startTest() {
         isRunning = true
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        // Show single button in stop state
+        binding.layoutCompletedButtons.visibility = View.GONE
+        binding.btnAction.visibility = View.VISIBLE
         binding.btnAction.text = getString(R.string.stop_test)
+        binding.btnAction.setBackgroundColor(getColor(R.color.border_stroke))
         binding.btnChangeServer.isEnabled = false
-        binding.graphView.clear()
 
         binding.layoutLiveMeter.visibility = View.VISIBLE
         binding.layoutCompletedHero.visibility = View.GONE
+        binding.graphView.clear()
 
         // Reset metrics
         binding.tvPingVal.text = "-- ms"
@@ -263,6 +276,10 @@ class MainActivity : AppCompatActivity() {
         onTestFinished()
         binding.layoutLiveMeter.visibility = View.VISIBLE
         binding.layoutCompletedHero.visibility = View.GONE
+        binding.layoutCompletedButtons.visibility = View.GONE
+        binding.btnAction.visibility = View.VISIBLE
+        binding.btnAction.text = getString(R.string.start_test)
+        binding.btnAction.setBackgroundColor(getColor(R.color.primary))
         binding.tvPhaseLabel.text = "STOPPED"
         binding.progressBar.progress = 0
     }
@@ -270,8 +287,54 @@ class MainActivity : AppCompatActivity() {
     private fun onTestFinished() {
         isRunning = false
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        binding.btnAction.text = getString(R.string.start_test)
         binding.btnChangeServer.isEnabled = true
+
+        if (currentState.stage == TestStage.COMPLETED) {
+            binding.btnAction.visibility = View.GONE
+            binding.layoutCompletedButtons.visibility = View.VISIBLE
+        } else {
+            binding.layoutCompletedButtons.visibility = View.GONE
+            binding.btnAction.visibility = View.VISIBLE
+            binding.btnAction.text = getString(R.string.start_test)
+            binding.btnAction.setBackgroundColor(getColor(R.color.primary))
+        }
+    }
+
+    private fun resetAllMetrics() {
+        testJob?.cancel()
+        testJob = null
+        isRunning = false
+
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        binding.layoutLiveMeter.visibility = View.VISIBLE
+        binding.layoutCompletedHero.visibility = View.GONE
+
+        binding.layoutCompletedButtons.visibility = View.GONE
+        binding.btnAction.visibility = View.VISIBLE
+        binding.btnAction.text = getString(R.string.start_test)
+        binding.btnAction.setBackgroundColor(getColor(R.color.primary))
+        binding.btnChangeServer.isEnabled = true
+
+        binding.tvPhaseLabel.text = getString(R.string.status_ready)
+        binding.tvLiveSpeed.text = "0.00"
+        binding.tvSpeedUnit.text = "Mbps"
+        binding.tvPingVal.text = "-- ms"
+        binding.tvJitterVal.text = "-- ms"
+        binding.tvDownloadVal.text = "-- Mbps"
+        binding.tvUploadVal.text = "-- Mbps"
+        binding.progressBar.progress = 0
+        binding.graphView.clear()
+
+        currentState = currentState.copy(
+            stage = TestStage.IDLE,
+            pingMs = 0,
+            jitterMs = 0,
+            downloadMbps = 0.0,
+            uploadMbps = 0.0,
+            currentSpeedMbps = 0.0,
+            progress = 0,
+            errorMessage = null
+        )
     }
 
     private fun updateProviderUi(state: SpeedState) {

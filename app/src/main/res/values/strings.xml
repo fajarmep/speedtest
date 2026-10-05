@@ -15,5 +15,7 @@
     <string name="status_testing_ping">TESTING PING…</string>
     <string name="status_testing_download">TESTING DOWNLOAD…</string>
     <string name="status_testing_upload">TESTING UPLOAD…</string>
+    <string name="btn_reset">RESET</string>
+    <string name="btn_test_again">TEST LAGI</string>
     <string name="status_completed">COMPLETED</string>
 </resources>
