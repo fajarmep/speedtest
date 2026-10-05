@@ -187,7 +187,7 @@ class MainActivity : AppCompatActivity() {
                 if (currentState.asn.isNotBlank() && currentState.asn != "--") append(currentState.asn)
                 if (currentState.location.isNotBlank() && currentState.location != "--") {
                     if (isNotEmpty()) append(" • ")
-                    append("${currentState.location} [$locTag]")
+                    append("${currentState.location} ($locTag)")
                 }
             }
             if (detail.isNotBlank()) {
@@ -392,7 +392,7 @@ class MainActivity : AppCompatActivity() {
             if (state.asn.isNotBlank() && state.asn != "--") append(state.asn)
             if (state.location.isNotBlank() && state.location != "--") {
                 if (isNotEmpty()) append(" • ")
-                append("${state.location} [$locTag]")
+                append("${state.location} ($locTag)")
             }
         }
         if (detail.isNotBlank()) {
