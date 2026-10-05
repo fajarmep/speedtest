@@ -196,23 +196,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadInitialProviderInfo() {
-        lifecycleScope.launch {
-            val providerState = engine.fetchProviderInfo()
-            currentState = currentState.copy(
-                ip = providerState.ip,
-                isp = providerState.isp,
-                asn = providerState.asn,
-                location = providerState.location,
-                latitude = currentState.latitude ?: providerState.latitude,
-                longitude = currentState.longitude ?: providerState.longitude
-            )
-
-            if (!currentState.isGpsLocation && currentState.latitude != null && currentState.longitude != null) {
-                applyLocationCoordinates(currentState.latitude!!, currentState.longitude!!, isGps = false)
+        // Fast operator display from telephony if cellular
+        try {
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
+            val carrier = tm?.networkOperatorName
+            if (!carrier.isNullOrBlank()) {
+                binding.tvIspVal.text = carrier
+                currentState = currentState.copy(isp = carrier)
             }
+        } catch (_: Exception) {}
 
-            runOnUiThread {
-                updateProviderUi(currentState)
+        lifecycleScope.launch {
+            try {
+                val providerState = engine.fetchProviderInfo()
+                currentState = currentState.copy(
+                    ip = providerState.ip,
+                    isp = providerState.isp,
+                    asn = providerState.asn,
+                    location = providerState.location,
+                    latitude = currentState.latitude ?: providerState.latitude,
+                    longitude = currentState.longitude ?: providerState.longitude
+                )
+
+                if (!currentState.isGpsLocation && currentState.latitude != null && currentState.longitude != null) {
+                    applyLocationCoordinates(currentState.latitude!!, currentState.longitude!!, isGps = false)
+                }
+
+                runOnUiThread {
+                    updateProviderUi(currentState)
+                }
+            } catch (_: Exception) {
+                runOnUiThread {
+                    if (binding.tvIspVal.text == "Mendeteksi Provider…") {
+                        binding.tvIspVal.text = "Koneksi Terhubung"
+                        binding.tvIspDetail.text = "Koneksi Aktif"
+                    }
+                }
             }
         }
     }
@@ -335,6 +354,7 @@ class MainActivity : AppCompatActivity() {
             progress = 0,
             errorMessage = null
         )
+        updateProviderUi(currentState)
     }
 
     private fun updateProviderUi(state: SpeedState) {

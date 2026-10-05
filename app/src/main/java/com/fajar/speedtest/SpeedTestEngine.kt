@@ -61,64 +61,86 @@ class SpeedTestEngine {
         var lon: Double? = null
         var colo = "CGK"
 
-        // 1. Try ipwho.is (fast HTTPS, rich metadata)
+        // 1. Primary: Cloudflare Edge (50ms response, immune to IP blocklists, provides direct ASN & IP)
         try {
-            val req = Request.Builder()
-                .url("https://ipwho.is/")
+            val cfReq = Request.Builder()
+                .url("https://speed.cloudflare.com/__down?bytes=0")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
                 .build()
-            client.newCall(req).execute().use { res ->
-                if (res.isSuccessful) {
-                    val body = res.body?.string().orEmpty()
-                    val json = JSONObject(body)
-                    if (json.optBoolean("success", true)) {
-                        ip = json.optString("ip", ip)
-                        val city = json.optString("city", "")
-                        val country = json.optString("country", "")
-                        location = if (city.isNotBlank()) "$city, $country" else country
+            client.newCall(cfReq).execute().use { res ->
+                val headerIp = res.header("cf-meta-ip") ?: res.header("ip")
+                val headerAsn = res.header("asn") ?: res.header("cf-meta-asn")
+                val headerCity = res.header("city") ?: res.header("cf-meta-city")
+                val headerCountry = res.header("country") ?: res.header("cf-meta-country")
+                val headerColo = res.header("colo") ?: res.header("cf-meta-colo")
+                val headerLat = (res.header("latitude") ?: res.header("cf-meta-latitude"))?.toDoubleOrNull()
+                val headerLon = (res.header("longitude") ?: res.header("cf-meta-longitude"))?.toDoubleOrNull()
 
-                        lat = json.optDouble("latitude")
-                        lon = json.optDouble("longitude")
+                if (!headerIp.isNullOrBlank()) ip = headerIp
+                if (!headerColo.isNullOrBlank()) colo = headerColo
+                if (headerLat != null) lat = headerLat
+                if (headerLon != null) lon = headerLon
 
-                        val conn = json.optJSONObject("connection")
-                        if (conn != null) {
-                            isp = conn.optString("isp", conn.optString("org", isp))
-                            val asnNum = conn.optInt("asn", 0)
-                            if (asnNum > 0) asn = "AS$asnNum"
-                        }
+                if (!headerAsn.isNullOrBlank()) {
+                    asn = "AS$headerAsn"
+                    val asnNum = headerAsn.toIntOrNull()
+                    val resolved = AsnResolver.resolveIsp(asnNum)
+                    if (resolved != null) {
+                        isp = resolved
+                    } else {
+                        isp = "Network AS$headerAsn"
                     }
+                }
+
+                if (!headerCity.isNullOrBlank()) {
+                    location = if (!headerCountry.isNullOrBlank()) "$headerCity, $headerCountry" else headerCity
                 }
             }
         } catch (_: Exception) {}
 
-        // 2. Cloudflare trace fallback
-        if (isp == "--" || ip == "--" || lat == null) {
+        // 2. Secondary enrichment: Only if ISP is unknown, query ipwho.is with short 2s timeout
+        if (isp.startsWith("Network AS") || isp == "--") {
             try {
-                val cfReq = Request.Builder()
-                    .url("https://speed.cloudflare.com/__down?bytes=0")
+                val req = Request.Builder()
+                    .url("https://ipwho.is/")
+                    .header("User-Agent", "Mozilla/5.0")
                     .build()
-                client.newCall(cfReq).execute().use { res ->
-                    val cfIp = res.header("cf-meta-ip")
-                    val cfAsn = res.header("cf-meta-asn")
-                    val cfCity = res.header("cf-meta-city")
-                    val cfCountry = res.header("cf-meta-country")
-                    val cfColo = res.header("cf-meta-colo")
-                    val cfLat = res.header("cf-meta-latitude")?.toDoubleOrNull()
-                    val cfLon = res.header("cf-meta-longitude")?.toDoubleOrNull()
+                val quickClient = client.newBuilder()
+                    .connectTimeout(2, TimeUnit.SECONDS)
+                    .readTimeout(2, TimeUnit.SECONDS)
+                    .build()
 
-                    if (!cfIp.isNullOrBlank()) ip = cfIp
-                    if (!cfAsn.isNullOrBlank()) asn = "AS$cfAsn"
-                    if (!cfColo.isNullOrBlank()) colo = cfColo
-                    if (lat == null && cfLat != null) lat = cfLat
-                    if (lon == null && cfLon != null) lon = cfLon
+                quickClient.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string().orEmpty()
+                        val json = JSONObject(body)
+                        if (json.optBoolean("success", true)) {
+                            if (ip == "--") ip = json.optString("ip", ip)
+                            val city = json.optString("city", "")
+                            val country = json.optString("country", "")
+                            if (location == "--" && city.isNotBlank()) location = "$city, $country"
+                            if (lat == null) lat = json.optDouble("latitude")
+                            if (lon == null) lon = json.optDouble("longitude")
 
-                    if (location == "--" && !cfCity.isNullOrBlank()) {
-                        location = "$cfCity, ${cfCountry ?: ""}"
-                    }
-                    if (isp == "--" && !cfAsn.isNullOrBlank()) {
-                        isp = "Network AS$cfAsn"
+                            val conn = json.optJSONObject("connection")
+                            if (conn != null) {
+                                val orgIsp = conn.optString("isp", conn.optString("org", ""))
+                                if (orgIsp.isNotBlank()) isp = orgIsp
+                            }
+                        }
                     }
                 }
             } catch (_: Exception) {}
+        }
+
+        // Final guard: Ensure ISP is never left as empty placeholder
+        if (isp == "--" && asn != "--") {
+            isp = "ISP $asn"
+        } else if (isp == "--") {
+            isp = "Koneksi Terhubung"
+        }
+        if (location == "--") {
+            location = "Indonesia"
         }
 
         SpeedState(
