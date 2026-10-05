@@ -95,8 +95,6 @@ class SpeedTestEngine {
                     val resolved = AsnResolver.resolveIsp(asnNum)
                     if (resolved != null) {
                         isp = resolved
-                    } else {
-                        isp = "Network AS$headerAsn"
                     }
                 }
 
@@ -106,35 +104,81 @@ class SpeedTestEngine {
             }
         } catch (_: Exception) {}
 
-        // 2. Secondary enrichment: Only if ISP is unknown, query ipwho.is with short 2s timeout
-        if (isp.startsWith("Network AS") || isp == "--") {
+        val cleanAsnNum = asn.removePrefix("AS").toIntOrNull()
+
+        // 2. Secondary Enrichment: FreeIPAPI (fast, zero key, provides clean company name)
+        if (isp == "--" || isp.isBlank()) {
+            try {
+                val req = Request.Builder()
+                    .url("https://freeipapi.com/api/json")
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                    .build()
+                val quickClient = client.newBuilder()
+                    .connectTimeout(3, TimeUnit.SECONDS)
+                    .readTimeout(3, TimeUnit.SECONDS)
+                    .build()
+                quickClient.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string().orEmpty()
+                        val json = JSONObject(body)
+                        val org = json.optString("asnOrganization", "").trim()
+                        if (org.isNotBlank() && !org.equals("null", ignoreCase = true)) {
+                            isp = org
+                        }
+                        if (ip == "--") ip = json.optString("ipAddress", ip)
+                        val city = json.optString("cityName", "")
+                        val country = json.optString("countryName", "")
+                        if (location == "--" && city.isNotBlank()) location = "$city, $country"
+                        if (lat == null) lat = json.optDouble("latitude")
+                        if (lon == null) lon = json.optDouble("longitude")
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 3. Third Enrichment: Official APNIC RDAP Registry (Authoritative for all AS3xxxx & Asia-Pacific ASNs)
+        if ((isp == "--" || isp.isBlank()) && cleanAsnNum != null) {
+            try {
+                val req = Request.Builder()
+                    .url("https://rdap.apnic.net/autnum/$cleanAsnNum")
+                    .header("User-Agent", "Mozilla/5.0")
+                    .build()
+                val quickClient = client.newBuilder()
+                    .connectTimeout(3, TimeUnit.SECONDS)
+                    .readTimeout(3, TimeUnit.SECONDS)
+                    .build()
+                quickClient.newCall(req).execute().use { res ->
+                    if (res.isSuccessful) {
+                        val body = res.body?.string().orEmpty()
+                        val json = JSONObject(body)
+                        val rawName = json.optString("name", "").trim()
+                        if (rawName.isNotBlank()) {
+                            isp = AsnResolver.cleanApnicName(rawName)
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 4. Fourth Enrichment: IPWhois (Generous 4s timeout)
+        if (isp == "--" || isp.isBlank()) {
             try {
                 val req = Request.Builder()
                     .url("https://ipwho.is/")
                     .header("User-Agent", "Mozilla/5.0")
                     .build()
                 val quickClient = client.newBuilder()
-                    .connectTimeout(2, TimeUnit.SECONDS)
-                    .readTimeout(2, TimeUnit.SECONDS)
+                    .connectTimeout(4, TimeUnit.SECONDS)
+                    .readTimeout(4, TimeUnit.SECONDS)
                     .build()
-
                 quickClient.newCall(req).execute().use { res ->
                     if (res.isSuccessful) {
                         val body = res.body?.string().orEmpty()
                         val json = JSONObject(body)
-                        if (json.optBoolean("success", true)) {
-                            if (ip == "--") ip = json.optString("ip", ip)
-                            val city = json.optString("city", "")
-                            val country = json.optString("country", "")
-                            if (location == "--" && city.isNotBlank()) location = "$city, $country"
-                            if (lat == null) lat = json.optDouble("latitude")
-                            if (lon == null) lon = json.optDouble("longitude")
-
-                            val conn = json.optJSONObject("connection")
-                            if (conn != null) {
-                                val orgIsp = conn.optString("isp", conn.optString("org", ""))
-                                if (orgIsp.isNotBlank()) isp = orgIsp
-                            }
+                        val conn = json.optJSONObject("connection")
+                        if (conn != null) {
+                            val orgIsp = conn.optString("isp", conn.optString("org", "")).trim()
+                            if (orgIsp.isNotBlank()) isp = orgIsp
                         }
                     }
                 }
