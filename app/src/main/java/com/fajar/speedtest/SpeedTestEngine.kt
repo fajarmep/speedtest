@@ -1,8 +1,11 @@
 package com.fajar.speedtest
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import okhttp3.Dispatcher
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,7 +13,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.coroutineContext
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
 enum class TestStage {
@@ -49,6 +53,10 @@ class SpeedTestEngine {
         .connectTimeout(8, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
         .writeTimeout(12, TimeUnit.SECONDS)
+        .dispatcher(Dispatcher().apply {
+            maxRequests = 32
+            maxRequestsPerHost = 16
+        })
         .retryOnConnectionFailure(true)
         .build()
 
@@ -188,11 +196,11 @@ class SpeedTestEngine {
             state = measurePingAndJitter(server, state, onProgress)
             onProgress(state)
 
-            // 2. Download Speed Test
+            // 2. Download Speed Test (Multi-stream + 90th percentile)
             state = measureDownloadSpeed(server, state, onProgress)
             onProgress(state)
 
-            // 3. Upload Speed Test
+            // 3. Upload Speed Test (Multi-stream + 90th percentile)
             state = measureUploadSpeed(server, state, onProgress)
             onProgress(state)
 
@@ -257,164 +265,186 @@ class SpeedTestEngine {
         server: SpeedServer,
         currentState: SpeedState,
         onProgress: (SpeedState) -> Unit
-    ): SpeedState {
+    ): SpeedState = withContext(Dispatchers.IO) {
         var state = currentState.copy(stage = TestStage.DOWNLOAD, progress = 0)
         onProgress(state)
 
-        val request = Request.Builder()
-            .url(server.downloadUrl)
-            .build()
-
-        val buffer = ByteArray(64 * 1024)
         val testDurationMs = 8000L
-        var totalBytes = 0L
-        var smoothedSpeed = 0.0
-        val recordedSamples = mutableListOf<Double>()
+        val warmupDurationMs = 1200L // Ookla standard: discard first 1.2s ramp-up
+        val totalBytes = AtomicLong(0L)
+        val isRunning = AtomicBoolean(true)
 
-        try {
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) throw IOException("Download HTTP ${response.code}")
-                val inputStream = response.body?.byteStream() ?: throw IOException("Empty response")
-
-                val startTime = System.currentTimeMillis()
-                var lastSampleTime = startTime
-                var lastSampleBytes = 0L
-
-                while (coroutineContext.isActive) {
-                    val read = inputStream.read(buffer)
-                    if (read == -1) break
-                    totalBytes += read
-
-                    val now = System.currentTimeMillis()
-                    val interval = now - lastSampleTime
-                    if (interval >= 120) {
-                        val bytesDiff = totalBytes - lastSampleBytes
-                        val instantMbps = (bytesDiff * 8.0) / (interval * 1000.0)
-                        smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
-
-                        if (now - startTime > 800) {
-                            recordedSamples.add(smoothedSpeed)
+        val parallelStreams = 3 // Multi-stream saturation
+        val downloadJobs = (0 until parallelStreams).map {
+            launch {
+                val buffer = ByteArray(64 * 1024)
+                while (isRunning.get() && isActive) {
+                    val request = Request.Builder()
+                        .url(server.downloadUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                        .build()
+                    try {
+                        client.newCall(request).execute().use { response ->
+                            val stream = response.body?.byteStream() ?: return@use
+                            while (isRunning.get() && isActive) {
+                                val read = stream.read(buffer)
+                                if (read == -1) break
+                                totalBytes.addAndGet(read.toLong())
+                            }
                         }
-
-                        val elapsed = now - startTime
-                        val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
-                        state = state.copy(
-                            currentSpeedMbps = smoothedSpeed,
-                            downloadMbps = smoothedSpeed,
-                            progress = progress
-                        )
-                        onProgress(state)
-
-                        lastSampleTime = now
-                        lastSampleBytes = totalBytes
-                    }
-
-                    if (now - startTime >= testDurationMs) break
+                    } catch (_: Exception) {}
                 }
-
-                val totalElapsed = System.currentTimeMillis() - startTime
-                val finalSpeed = when {
-                    recordedSamples.isNotEmpty() -> {
-                        val sorted = recordedSamples.sorted()
-                        val cutIndex = (sorted.size * 0.15).toInt()
-                        sorted.subList(cutIndex, sorted.size).average()
-                    }
-                    totalElapsed > 0 -> (totalBytes * 8.0) / (totalElapsed * 1000.0)
-                    else -> smoothedSpeed
-                }
-                state = state.copy(downloadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
             }
-        } catch (e: Exception) {
-            if (!coroutineContext.isActive) throw e
-            val finalSpeed = if (recordedSamples.isNotEmpty()) recordedSamples.average() else smoothedSpeed
-            state = state.copy(downloadMbps = finalSpeed, currentSpeedMbps = finalSpeed)
         }
 
-        return state
+        val startTime = System.currentTimeMillis()
+        var lastTime = startTime
+        var lastBytes = 0L
+        var smoothedSpeed = 0.0
+        val sliceSamples = mutableListOf<Double>()
+
+        while (isActive) {
+            delay(100)
+            val now = System.currentTimeMillis()
+            val elapsed = now - startTime
+            if (elapsed >= testDurationMs) break
+
+            val currentBytes = totalBytes.get()
+            val intervalMs = now - lastTime
+            if (intervalMs >= 100) {
+                val bytesDiff = currentBytes - lastBytes
+                val instantMbps = (bytesDiff * 8.0) / (intervalMs * 1000.0)
+                smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
+
+                if (elapsed >= warmupDurationMs && instantMbps > 0.0) {
+                    sliceSamples.add(instantMbps)
+                }
+
+                val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
+                state = state.copy(
+                    currentSpeedMbps = smoothedSpeed,
+                    downloadMbps = smoothedSpeed,
+                    progress = progress
+                )
+                onProgress(state)
+
+                lastTime = now
+                lastBytes = currentBytes
+            }
+        }
+
+        isRunning.set(false)
+        downloadJobs.forEach { it.cancel() }
+
+        val finalSpeed = calculateOokla90thPercentile(sliceSamples, smoothedSpeed)
+        state = state.copy(downloadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
+        state
     }
 
     private suspend fun measureUploadSpeed(
         server: SpeedServer,
         currentState: SpeedState,
         onProgress: (SpeedState) -> Unit
-    ): SpeedState {
+    ): SpeedState = withContext(Dispatchers.IO) {
         var state = currentState.copy(stage = TestStage.UPLOAD, progress = 0)
         onProgress(state)
 
-        val totalTestTimeMs = 7000L
-        val startTime = System.currentTimeMillis()
-        val recordedSamples = mutableListOf<Double>()
-        var smoothedSpeed = 0.0
-
-        // Multi-chunk sequential upload: measures TRUE end-to-end round trip wire delivery.
-        // Prevents TCP socket buffer dumps from giving fake 100+ Mbps numbers.
-        val dummySmall = ByteArray(512 * 1024) { 0x5A.toByte() }  // 512KB warmup chunk
-        val dummyMedium = ByteArray(1024 * 1024) { 0x5A.toByte() } // 1MB standard chunk
-        val dummyLarge = ByteArray(2 * 1024 * 1024) { 0x5A.toByte() } // 2MB fast chunk
+        val testDurationMs = 7500L
+        val warmupDurationMs = 1200L // Ookla standard: discard first 1.2s ramp-up
+        val totalBytesUploaded = AtomicLong(0L)
+        val isRunning = AtomicBoolean(true)
 
         val mediaType = "application/octet-stream".toMediaTypeOrNull()
-        var round = 0
+        val payload1M = ByteArray(1024 * 1024) { 0x5A.toByte() }
+        val payload2M = ByteArray(2 * 1024 * 1024) { 0x5A.toByte() }
 
-        while (coroutineContext.isActive) {
+        val parallelWorkers = 3 // Multi-stream parallel ACKed uploads
+        val uploadJobs = (0 until parallelWorkers).map {
+            launch {
+                var chunkCount = 0
+                while (isRunning.get() && isActive) {
+                    val payload = if (chunkCount < 2) payload1M else payload2M
+                    val reqBody = payload.toRequestBody(mediaType)
+                    val request = Request.Builder()
+                        .url(server.uploadUrl)
+                        .header("Origin", "https://speed.cloudflare.com")
+                        .header("Referer", "https://speed.cloudflare.com/")
+                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                        .post(reqBody)
+                        .build()
+
+                    try {
+                        client.newCall(request).execute().use { response ->
+                            response.body?.string()
+                            if (response.isSuccessful) {
+                                totalBytesUploaded.addAndGet(payload.size.toLong())
+                            }
+                        }
+                    } catch (_: Exception) {}
+                    chunkCount++
+                }
+            }
+        }
+
+        val startTime = System.currentTimeMillis()
+        var lastTime = startTime
+        var lastBytes = 0L
+        var smoothedSpeed = 0.0
+        val sliceSamples = mutableListOf<Double>()
+
+        while (isActive) {
+            delay(100)
             val now = System.currentTimeMillis()
             val elapsed = now - startTime
-            if (elapsed >= totalTestTimeMs) break
+            if (elapsed >= testDurationMs) break
 
-            val payload = when {
-                round == 0 -> dummySmall
-                smoothedSpeed > 25.0 -> dummyLarge
-                else -> dummyMedium
-            }
+            val currentBytes = totalBytesUploaded.get()
+            val intervalMs = now - lastTime
+            if (intervalMs >= 100) {
+                val bytesDiff = currentBytes - lastBytes
+                val instantMbps = (bytesDiff * 8.0) / (intervalMs * 1000.0)
+                smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
 
-            val reqBody = payload.toRequestBody(mediaType)
-            val request = Request.Builder()
-                .url(server.uploadUrl)
-                .header("Origin", "https://speed.cloudflare.com")
-                .header("Referer", "https://speed.cloudflare.com/")
-                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
-                .post(reqBody)
-                .build()
-
-            val chunkStart = System.nanoTime()
-            try {
-                client.newCall(request).execute().use { response ->
-                    response.body?.string()
+                if (elapsed >= warmupDurationMs && instantMbps > 0.0) {
+                    sliceSamples.add(instantMbps)
                 }
-                val chunkDurationSec = (System.nanoTime() - chunkStart) / 1_000_000_000.0
-                if (chunkDurationSec > 0.02) {
-                    val chunkMbps = (payload.size * 8.0) / (chunkDurationSec * 1_000_000.0)
-                    smoothedSpeed = if (smoothedSpeed == 0.0) chunkMbps else (smoothedSpeed * 0.4 + chunkMbps * 0.6)
 
-                    if (round > 0) { // Ignore first round (warmup TCP handshake)
-                        recordedSamples.add(chunkMbps)
-                    }
+                val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
+                state = state.copy(
+                    currentSpeedMbps = smoothedSpeed,
+                    uploadMbps = smoothedSpeed,
+                    progress = progress
+                )
+                onProgress(state)
 
-                    val currentElapsed = System.currentTimeMillis() - startTime
-                    val progress = ((currentElapsed.toFloat() / totalTestTimeMs) * 100).toInt().coerceIn(0, 100)
-                    state = state.copy(
-                        currentSpeedMbps = smoothedSpeed,
-                        uploadMbps = smoothedSpeed,
-                        progress = progress
-                    )
-                    onProgress(state)
-                }
-            } catch (e: Exception) {
-                if (!coroutineContext.isActive) throw e
+                lastTime = now
+                lastBytes = currentBytes
             }
-            round++
         }
 
-        val finalSpeed = when {
-            recordedSamples.isNotEmpty() -> {
-                val sorted = recordedSamples.sorted()
-                val cutIndex = (sorted.size * 0.15).toInt()
-                sorted.subList(cutIndex, sorted.size).average()
-            }
-            smoothedSpeed > 0 -> smoothedSpeed
-            else -> 0.0
-        }
+        isRunning.set(false)
+        uploadJobs.forEach { it.cancel() }
 
+        val finalSpeed = calculateOokla90thPercentile(sliceSamples, smoothedSpeed)
         state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
-        return state
+        state
+    }
+
+    /**
+     * Standard Ookla Methodology:
+     * Discards ramp-up, sorts steady state rate slices, and takes 90th percentile
+     * (or trimmed 80th-92nd sustained window to filter single micro-spikes).
+     */
+    private fun calculateOokla90thPercentile(samples: List<Double>, fallback: Double): Double {
+        if (samples.isEmpty()) return fallback
+        val sorted = samples.sorted()
+        return if (sorted.size >= 10) {
+            val fromIndex = (sorted.size * 0.80).toInt()
+            val toIndex = (sorted.size * 0.92).toInt().coerceAtLeast(fromIndex + 1).coerceAtMost(sorted.size)
+            sorted.subList(fromIndex, toIndex).average()
+        } else {
+            val idx = (sorted.size * 0.90).toInt().coerceIn(0, sorted.lastIndex)
+            sorted[idx]
+        }
     }
 }
