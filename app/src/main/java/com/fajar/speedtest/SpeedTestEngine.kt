@@ -349,83 +349,71 @@ class SpeedTestEngine {
         var state = currentState.copy(stage = TestStage.UPLOAD, progress = 0)
         onProgress(state)
 
-        val testDurationMs = 7500L
-        val warmupDurationMs = 1200L // Ookla standard: discard first 1.2s ramp-up
-        val totalBytesUploaded = AtomicLong(0L)
-        val isRunning = AtomicBoolean(true)
+        val testDurationMs = 7000L
+        val startTime = System.currentTimeMillis()
+        val recordedSamples = mutableListOf<Double>()
+        var smoothedSpeed = 0.0
 
         val mediaType = "application/octet-stream".toMediaTypeOrNull()
-        val payload1M = ByteArray(1024 * 1024) { 0x5A.toByte() }
-        val payload2M = ByteArray(2 * 1024 * 1024) { 0x5A.toByte() }
+        val payloadWarmup = ByteArray(256 * 1024) { 0x5A.toByte() }
+        val payloadSmall = ByteArray(512 * 1024) { 0x5A.toByte() }
+        val payloadMed = ByteArray(1024 * 1024) { 0x5A.toByte() }
+        val payloadLarge = ByteArray(2 * 1024 * 1024) { 0x5A.toByte() }
 
-        val parallelWorkers = 3 // Multi-stream parallel ACKed uploads
-        val uploadJobs = (0 until parallelWorkers).map {
-            launch {
-                var chunkCount = 0
-                while (isRunning.get() && isActive) {
-                    val payload = if (chunkCount < 2) payload1M else payload2M
-                    val reqBody = payload.toRequestBody(mediaType)
-                    val request = Request.Builder()
-                        .url(server.uploadUrl)
-                        .header("Origin", "https://speed.cloudflare.com")
-                        .header("Referer", "https://speed.cloudflare.com/")
-                        .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
-                        .post(reqBody)
-                        .build()
-
-                    try {
-                        client.newCall(request).execute().use { response ->
-                            response.body?.string()
-                            if (response.isSuccessful) {
-                                totalBytesUploaded.addAndGet(payload.size.toLong())
-                            }
-                        }
-                    } catch (_: Exception) {}
-                    chunkCount++
-                }
-            }
-        }
-
-        val startTime = System.currentTimeMillis()
-        var lastTime = startTime
-        var lastBytes = 0L
-        var smoothedSpeed = 0.0
-        val sliceSamples = mutableListOf<Double>()
+        var round = 0
 
         while (isActive) {
-            delay(100)
             val now = System.currentTimeMillis()
             val elapsed = now - startTime
             if (elapsed >= testDurationMs) break
 
-            val currentBytes = totalBytesUploaded.get()
-            val intervalMs = now - lastTime
-            if (intervalMs >= 100) {
-                val bytesDiff = currentBytes - lastBytes
-                val instantMbps = (bytesDiff * 8.0) / (intervalMs * 1000.0)
-                smoothedSpeed = if (smoothedSpeed == 0.0) instantMbps else (smoothedSpeed * 0.35 + instantMbps * 0.65)
-
-                if (elapsed >= warmupDurationMs && instantMbps > 0.0) {
-                    sliceSamples.add(instantMbps)
-                }
-
-                val progress = ((elapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
-                state = state.copy(
-                    currentSpeedMbps = smoothedSpeed,
-                    uploadMbps = smoothedSpeed,
-                    progress = progress
-                )
-                onProgress(state)
-
-                lastTime = now
-                lastBytes = currentBytes
+            // Select payload size adaptively to ensure responsive, steady sampling (~200-300ms per chunk)
+            val payload = when {
+                round == 0 -> payloadWarmup
+                smoothedSpeed < 18.0 -> payloadSmall
+                smoothedSpeed < 70.0 -> payloadMed
+                else -> payloadLarge
             }
+
+            val reqBody = payload.toRequestBody(mediaType)
+            val request = Request.Builder()
+                .url(server.uploadUrl)
+                .header("Origin", "https://speed.cloudflare.com")
+                .header("Referer", "https://speed.cloudflare.com/")
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 14)")
+                .post(reqBody)
+                .build()
+
+            val chunkStart = System.nanoTime()
+            try {
+                client.newCall(request).execute().use { response ->
+                    response.body?.string()
+                }
+                val chunkDurationSec = (System.nanoTime() - chunkStart) / 1_000_000_000.0
+                if (chunkDurationSec > 0.02) {
+                    val chunkMbps = (payload.size * 8.0) / (chunkDurationSec * 1_000_000.0)
+                    smoothedSpeed = if (smoothedSpeed == 0.0) chunkMbps else (smoothedSpeed * 0.35 + chunkMbps * 0.65)
+
+                    if (round > 0) { // Discard warmup chunk (round 0)
+                        recordedSamples.add(chunkMbps)
+                    }
+
+                    val currentElapsed = System.currentTimeMillis() - startTime
+                    val progress = ((currentElapsed.toFloat() / testDurationMs) * 100).toInt().coerceIn(0, 100)
+                    state = state.copy(
+                        currentSpeedMbps = smoothedSpeed,
+                        uploadMbps = smoothedSpeed,
+                        progress = progress
+                    )
+                    onProgress(state)
+                }
+            } catch (e: Exception) {
+                if (!coroutineContext.isActive) throw e
+            }
+            round++
         }
 
-        isRunning.set(false)
-        uploadJobs.forEach { it.cancel() }
-
-        val finalSpeed = calculateOokla90thPercentile(sliceSamples, smoothedSpeed)
+        val finalSpeed = calculateOokla90thPercentile(recordedSamples, smoothedSpeed)
         state = state.copy(uploadMbps = finalSpeed, currentSpeedMbps = finalSpeed, progress = 100)
         state
     }
