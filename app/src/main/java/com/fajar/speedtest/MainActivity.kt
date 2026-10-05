@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val engine = SpeedTestEngine()
     private var testJob: Job? = null
+    private var providerJob: Job? = null
     private var isRunning = false
 
     private var serverList: List<SpeedServer> = ServerCatalog.getServersWithDistance(null, null)
@@ -196,6 +197,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadInitialProviderInfo() {
+        providerJob?.cancel()
         // Fast operator display from telephony if cellular
         try {
             val tm = getSystemService(Context.TELEPHONY_SERVICE) as? android.telephony.TelephonyManager
@@ -206,7 +208,7 @@ class MainActivity : AppCompatActivity() {
             }
         } catch (_: Exception) {}
 
-        lifecycleScope.launch {
+        providerJob = lifecycleScope.launch {
             try {
                 val providerState = engine.fetchProviderInfo()
                 currentState = currentState.copy(
@@ -227,7 +229,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } catch (_: Exception) {
                 runOnUiThread {
-                    if (binding.tvIspVal.text == "Mendeteksi Provider…") {
+                    if (binding.tvIspVal.text == "Mendeteksi Provider…" || binding.tvIspVal.text.isBlank()) {
                         binding.tvIspVal.text = "Koneksi Terhubung"
                         binding.tvIspDetail.text = "Koneksi Aktif"
                     }
@@ -344,6 +346,11 @@ class MainActivity : AppCompatActivity() {
         binding.progressBar.progress = 0
         binding.graphView.clear()
 
+        // Fresh network & provider lookup on reset
+        binding.tvIspVal.text = "Mendeteksi Provider…"
+        binding.tvIspDetail.text = "Memperbarui info jaringan…"
+        binding.tvIpVal.text = "--"
+
         currentState = currentState.copy(
             stage = TestStage.IDLE,
             pingMs = 0,
@@ -352,9 +359,25 @@ class MainActivity : AppCompatActivity() {
             uploadMbps = 0.0,
             currentSpeedMbps = 0.0,
             progress = 0,
-            errorMessage = null
+            errorMessage = null,
+            ip = "--",
+            isp = "--",
+            asn = "--"
         )
-        updateProviderUi(currentState)
+
+        updateNetworkBadge()
+
+        val fineGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val coarseGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (fineGranted || coarseGranted) {
+            fetchGpsLocation()
+        }
+
+        loadInitialProviderInfo()
     }
 
     private fun updateProviderUi(state: SpeedState) {
